@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+
+# Xcode
+DerivedData/
+*.xcuserdata/
+
+# Generated app bundles
+*.app/
+
+# Logs
+*.log
