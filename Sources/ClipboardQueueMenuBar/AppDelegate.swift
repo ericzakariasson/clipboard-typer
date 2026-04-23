@@ -59,6 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self?.handleHotKey(action)
     }
 
+    private var pendingTypeNextAfterModifierRelease = false
+    private var modifierReleaseGlobalMonitor: Any?
+    private var modifierReleaseLocalMonitor: Any?
+
     private var statusMessage = "Ready"
     private var currentlyTypingPreview: String?
 
@@ -179,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        clearModifierReleaseMonitors()
         typer.cancel()
     }
 
@@ -514,10 +519,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .enqueueClipboard:
             enqueueClipboard()
         case .typeNext:
-            typeNextQueuedMessage()
+            typeNextQueuedMessageAfterHotKeyRelease()
         case .showControls:
             showControlsPanel()
         }
+    }
+
+    private func typeNextQueuedMessageAfterHotKeyRelease() {
+        guard heldModifierFlags().isEmpty else {
+            guard !pendingTypeNextAfterModifierRelease else {
+                return
+            }
+
+            pendingTypeNextAfterModifierRelease = true
+            clearModifierReleaseMonitors()
+
+            let tryStartTyping = { [weak self] in
+                guard let self else {
+                    return
+                }
+
+                guard self.pendingTypeNextAfterModifierRelease else {
+                    return
+                }
+
+                guard self.heldModifierFlags().isEmpty else {
+                    return
+                }
+
+                self.pendingTypeNextAfterModifierRelease = false
+                self.clearModifierReleaseMonitors()
+                self.typeNextQueuedMessage()
+            }
+
+            modifierReleaseGlobalMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.flagsChanged, .keyUp]
+            ) { _ in
+                tryStartTyping()
+            }
+            modifierReleaseLocalMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.flagsChanged, .keyUp]
+            ) { event in
+                tryStartTyping()
+                return event
+            }
+            tryStartTyping()
+            return
+        }
+
+        typeNextQueuedMessage()
     }
 
     private func enqueueClipboard() {
@@ -646,6 +696,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ] as CFDictionary
 
         return AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func heldModifierFlags() -> CGEventFlags {
+        CGEventSource.flagsState(.hidSystemState)
+            .intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
+    }
+
+    private func clearModifierReleaseMonitors() {
+        if let modifierReleaseGlobalMonitor {
+            NSEvent.removeMonitor(modifierReleaseGlobalMonitor)
+            self.modifierReleaseGlobalMonitor = nil
+        }
+
+        if let modifierReleaseLocalMonitor {
+            NSEvent.removeMonitor(modifierReleaseLocalMonitor)
+            self.modifierReleaseLocalMonitor = nil
+        }
     }
 
     private func updateMenu() {
