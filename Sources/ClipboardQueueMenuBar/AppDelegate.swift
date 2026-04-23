@@ -187,6 +187,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // System Settings doesn't notify us when Accessibility permission flips,
+        // so refresh on activation — the user is most likely returning here right
+        // after granting it.
+        updateMenu()
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         updateMenu()
     }
