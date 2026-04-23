@@ -1,16 +1,21 @@
 import AppKit
 import ApplicationServices
+import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private static let wordsPerMinuteDefaultsKey = "ClipboardQueueMenuBar.wordsPerMinute"
+
+    private static let toolbarIdentifier = NSToolbar.Identifier("ClipboardTyperToolbar")
+    private static let toolbarStop = NSToolbarItem.Identifier("ct.stop")
+    private static let toolbarClear = NSToolbarItem.Identifier("ct.clear")
 
     private let queue = ClipboardQueue()
     private let typer: Typer
     private let barItem = NSStatusBar.system.statusItem(withLength: 38)
     private let menu = NSMenu()
     private let controlsPanel = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 440, height: 430),
-        styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+        contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
+        styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
         backing: .buffered,
         defer: false
     )
@@ -25,12 +30,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let stopTypingItem = NSMenuItem(title: "Stop Typing", action: #selector(stopTypingFromMenu), keyEquivalent: "")
     private let clearQueueItem = NSMenuItem(title: "Clear Queue", action: #selector(clearQueueFromMenu), keyEquivalent: "")
     private let accessibilityItem = NSMenuItem(title: "Grant Accessibility Permission...", action: #selector(requestAccessibilityFromMenu), keyEquivalent: "")
+    private let launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
 
-    private let panelStatusLabel = NSTextField(wrappingLabelWithString: "Status: Ready")
-    private let panelQueueCountLabel = NSTextField(labelWithString: "Queue: 0")
-    private let panelNextLabel = NSTextField(wrappingLabelWithString: "Next: Empty")
-    private let panelQueueListLabel = NSTextField(wrappingLabelWithString: "Queue is empty.")
-    private let panelSpeedValueLabel = NSTextField(labelWithString: "Typing speed: 160 WPM")
+    private let panelStatusLabel = NSTextField(labelWithString: "Ready")
+    private let panelQueueSection = SectionView(title: "Queue")
+    private let panelQueueCountBadge = NSTextField(labelWithString: "0")
+    private let panelQueueEmptyLabel = NSTextField(labelWithString: "No items queued")
+    private let panelQueueScrollView = NSScrollView()
+    private let panelQueueTableView = QueueTableView()
+    private let panelQueueContainer = NSView()
+    private let panelSpeedSection = SectionView(title: "Typing speed")
+    private let panelSpeedValueLabel = NSTextField(labelWithString: "160 WPM")
     private let panelSpeedSlider = NSSlider(
         value: TypingSpeed.defaultWordsPerMinute,
         minValue: TypingSpeed.minimumWordsPerMinute,
@@ -38,12 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         target: nil,
         action: nil
     )
-    private let panelEnqueueButton = NSButton(title: "Enqueue Clipboard", target: nil, action: nil)
-    private let panelTypeNextButton = NSButton(title: "Type Next", target: nil, action: nil)
-    private let panelStopButton = NSButton(title: "Stop", target: nil, action: nil)
-    private let panelClearButton = NSButton(title: "Clear", target: nil, action: nil)
-    private let panelAccessibilityButton = NSButton(title: "Grant Accessibility", target: nil, action: nil)
-    private let panelQuitButton = NSButton(title: "Quit", target: nil, action: nil)
+    private let panelAccessibilityBanner = SectionView(title: nil)
+    private let panelAccessibilityButton = NSButton(title: "Open System Settings", target: nil, action: nil)
+    private let panelShortcutsLabel = NSTextField(labelWithString: "")
+
+    private var toolbarStopItem: NSToolbarItem?
+    private var toolbarClearItem: NSToolbarItem?
 
     private lazy var hotKeyController = HotKeyController { [weak self] action in
         self?.handleHotKey(action)
@@ -59,12 +69,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configureMainMenu()
         configureStatusItem()
         configureMenu()
         configureControlsPanel()
         registerHotKeys()
         updateMenu()
         showControlsPanel()
+    }
+
+    private func configureMainMenu() {
+        let appName = "Clipboard Typer"
+        let mainMenu = NSMenu()
+
+        // Application menu — gives us ⌘Q, ⌘H, About, etc.
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+
+        appMenu.addItem(NSMenuItem(
+            title: "About \(appName)",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: ""
+        ))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(
+            title: "Hide \(appName)",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        ))
+        let hideOthers = NSMenuItem(
+            title: "Hide Others",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(NSMenuItem(
+            title: "Show All",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: ""
+        ))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(
+            title: "Quit \(appName)",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        ))
+
+        // Edit menu — wired to first responder so the speed slider, text fields,
+        // and the queue table get standard editing shortcuts (cut/copy/paste/⌘A).
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(
+            title: "Select All",
+            action: #selector(NSText.selectAll(_:)),
+            keyEquivalent: "a"
+        ))
+
+        // Window menu — gives us ⌘W close, ⌘M minimize, etc.
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenuItem.submenu = windowMenu
+
+        windowMenu.addItem(NSMenuItem(
+            title: "Close",
+            action: #selector(NSWindow.performClose(_:)),
+            keyEquivalent: "w"
+        ))
+        windowMenu.addItem(NSMenuItem(
+            title: "Minimize",
+            action: #selector(NSWindow.performMiniaturize(_:)),
+            keyEquivalent: "m"
+        ))
+        windowMenu.addItem(NSMenuItem(
+            title: "Zoom",
+            action: #selector(NSWindow.performZoom(_:)),
+            keyEquivalent: ""
+        ))
+
+        // Help menu — completes the standard App / Edit / Window / Help layout.
+        let helpMenuItem = NSMenuItem()
+        mainMenu.addItem(helpMenuItem)
+        let helpMenu = NSMenu(title: "Help")
+        helpMenuItem.submenu = helpMenu
+
+        helpMenu.addItem(NSMenuItem(
+            title: "\(appName) Help",
+            action: #selector(showShortcutsHelp),
+            keyEquivalent: "?"
+        ))
+
+        NSApplication.shared.mainMenu = mainMenu
+        NSApplication.shared.windowsMenu = windowMenu
+        NSApplication.shared.helpMenu = helpMenu
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -82,8 +193,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func configureStatusItem() {
         if let button = barItem.button {
-            button.image = nil
-            button.title = "⌨0"
+            let image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Clipboard Typer")
+            image?.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageLeading
+            button.title = " 0"
             button.font = NSFont.menuBarFont(ofSize: 0)
             button.toolTip = "Clipboard Typer - click for queue and speed controls"
             button.target = self
@@ -109,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         addActionItem(accessibilityItem)
+        addActionItem(launchAtLoginItem)
 
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: "Quit Clipboard Typer", action: #selector(quitFromMenu), keyEquivalent: "q")
@@ -119,150 +234,258 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controlsPanel.title = "Clipboard Typer"
         controlsPanel.isReleasedWhenClosed = false
         controlsPanel.titlebarAppearsTransparent = true
-        controlsPanel.isMovableByWindowBackground = true
-        controlsPanel.backgroundColor = .clear
-        controlsPanel.isOpaque = false
-        controlsPanel.level = .normal
+        controlsPanel.titleVisibility = .visible
+        controlsPanel.toolbarStyle = .unified
         controlsPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        controlsPanel.center()
-
-        let contentView = NSVisualEffectView()
-        contentView.material = .hudWindow
-        contentView.blendingMode = .behindWindow
-        contentView.state = .active
-        controlsPanel.contentView = contentView
-
-        let titleLabel = NSTextField(labelWithString: "Clipboard Typer")
-        titleLabel.font = NSFont.boldSystemFont(ofSize: 24)
-        titleLabel.textColor = .labelColor
-
-        panelStatusLabel.font = NSFont.systemFont(ofSize: 12)
-        panelStatusLabel.textColor = .secondaryLabelColor
-        panelQueueCountLabel.font = NSFont.boldSystemFont(ofSize: 13)
-        panelNextLabel.maximumNumberOfLines = 3
-        panelQueueListLabel.maximumNumberOfLines = 6
-        panelQueueListLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        panelQueueListLabel.textColor = .labelColor
-
-        panelSpeedValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium)
-        panelSpeedSlider.target = self
-        panelSpeedSlider.action = #selector(typingSpeedSliderChanged(_:))
-        panelSpeedSlider.isContinuous = true
-        panelSpeedSlider.numberOfTickMarks = 11
-        panelSpeedSlider.allowsTickMarkValuesOnly = false
-        panelSpeedSlider.doubleValue = typer.wordsPerMinute
-        panelSpeedSlider.translatesAutoresizingMaskIntoConstraints = false
-
-        panelEnqueueButton.target = self
-        panelEnqueueButton.action = #selector(enqueueClipboardFromMenu)
-        panelTypeNextButton.target = self
-        panelTypeNextButton.action = #selector(typeNextFromMenu)
-        panelStopButton.target = self
-        panelStopButton.action = #selector(stopTypingFromMenu)
-        panelClearButton.target = self
-        panelClearButton.action = #selector(clearQueueFromMenu)
-        panelAccessibilityButton.target = self
-        panelAccessibilityButton.action = #selector(requestAccessibilityFromMenu)
-        panelQuitButton.target = self
-        panelQuitButton.action = #selector(quitFromMenu)
-
-        let speedLabel = NSTextField(labelWithString: "Typing speed")
-        speedLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        let shortcutsLabel = NSTextField(wrappingLabelWithString: "Shortcuts: Ctrl-Opt-Cmd-O opens controls, Ctrl-Opt-Cmd-C queues clipboard, Ctrl-Opt-Cmd-V types next.")
-        shortcutsLabel.font = NSFont.systemFont(ofSize: 11)
-        shortcutsLabel.textColor = .secondaryLabelColor
-
-        [panelEnqueueButton, panelTypeNextButton, panelStopButton, panelClearButton, panelAccessibilityButton, panelQuitButton].forEach {
-            $0.bezelStyle = .rounded
-            $0.controlSize = .large
+        controlsPanel.contentMinSize = NSSize(width: 540, height: 400)
+        // Remember window position across launches via NSUserDefaults under this key.
+        controlsPanel.setFrameAutosaveName("ClipboardTyperControls")
+        if controlsPanel.frame.origin == .zero {
+            controlsPanel.center()
         }
 
-        let buttonRow = NSStackView(views: [
-            panelEnqueueButton,
-            panelTypeNextButton,
-            panelStopButton,
-            panelClearButton,
+        let toolbar = NSToolbar(identifier: Self.toolbarIdentifier)
+        toolbar.delegate = self
+        toolbar.displayMode = .iconAndLabel
+        toolbar.allowsUserCustomization = false
+        toolbar.autosavesConfiguration = false
+        controlsPanel.toolbar = toolbar
+
+        // Translucent window so Liquid Glass surfaces (toolbar + cards) can
+        // refract the desktop and other content showing through.
+        controlsPanel.isOpaque = false
+        controlsPanel.backgroundColor = .clear
+
+        let backdrop = NSVisualEffectView()
+        backdrop.material = .menu
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .followsWindowActiveState
+        controlsPanel.contentView = backdrop
+        let contentView = backdrop
+
+        configureQueueSection()
+        configureSpeedSection()
+        configureAccessibilityBanner()
+        configureFooter()
+
+        let bodyContent = NSStackView(views: [
+            panelQueueSection,
+            panelSpeedSection,
+            panelAccessibilityBanner,
         ])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillEqually
+        bodyContent.orientation = .vertical
+        bodyContent.alignment = .leading
+        bodyContent.spacing = 14
+        bodyContent.translatesAutoresizingMaskIntoConstraints = false
 
-        let utilityRow = NSStackView(views: [
-            panelAccessibilityButton,
-            panelQuitButton,
-        ])
-        utilityRow.orientation = .horizontal
-        utilityRow.spacing = 8
-        utilityRow.distribution = .fillEqually
-
-        let queueCard = makeGlassCard(containing: NSStackView(views: [
-            panelQueueCountLabel,
-            panelNextLabel,
-            panelQueueListLabel,
-        ]))
-
-        let speedCard = makeGlassCard(containing: NSStackView(views: [
-            speedLabel,
-            panelSpeedValueLabel,
-            panelSpeedSlider,
-        ]))
+        // Group the cards in a glass effect container so multiple Liquid Glass
+        // surfaces share a single rendering pass and meld together as they move.
+        let glassContainer: NSView
+        if #available(macOS 26.0, *) {
+            let container = NSGlassEffectContainerView()
+            container.spacing = 14
+            container.contentView = bodyContent
+            container.translatesAutoresizingMaskIntoConstraints = false
+            glassContainer = container
+        } else {
+            glassContainer = bodyContent
+        }
 
         let stack = NSStackView(views: [
-            titleLabel,
+            glassContainer,
             panelStatusLabel,
-            queueCard,
-            speedCard,
-            buttonRow,
-            utilityRow,
-            shortcutsLabel,
+            panelShortcutsLabel,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
+        stack.setCustomSpacing(16, after: glassContainer)
+        stack.setCustomSpacing(4, after: panelStatusLabel)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(stack)
 
+        let safeArea = contentView.safeAreaLayoutGuide
+
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -22),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 46),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -22),
-            queueCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            speedCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            panelSpeedSlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 320),
-            buttonRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            utilityRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: safeArea.bottomAnchor, constant: -14),
+
+            glassContainer.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            bodyContent.widthAnchor.constraint(equalTo: glassContainer.widthAnchor),
+
+            panelQueueSection.widthAnchor.constraint(equalTo: bodyContent.widthAnchor),
+            panelSpeedSection.widthAnchor.constraint(equalTo: bodyContent.widthAnchor),
+            panelAccessibilityBanner.widthAnchor.constraint(equalTo: bodyContent.widthAnchor),
+
+            panelStatusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            panelShortcutsLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+
+            panelQueueScrollView.heightAnchor.constraint(equalToConstant: 132),
+            panelSpeedSlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 240),
         ])
     }
 
-    private func makeGlassCard(containing stack: NSStackView) -> NSView {
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
+    private func configureQueueSection() {
+        panelQueueCountBadge.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize,
+            weight: .medium
+        )
+        panelQueueCountBadge.textColor = .secondaryLabelColor
+        panelQueueSection.accessoryView = panelQueueCountBadge
 
-        let card = NSVisualEffectView()
-        card.material = .popover
-        card.blendingMode = .withinWindow
-        card.state = .active
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 18
-        card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(stack)
+        panelQueueTableView.style = .inset
+        panelQueueTableView.headerView = nil
+        panelQueueTableView.allowsMultipleSelection = false
+        panelQueueTableView.usesAutomaticRowHeights = true
+        panelQueueTableView.rowSizeStyle = .default
+        panelQueueTableView.intercellSpacing = NSSize(width: 0, height: 2)
+        panelQueueTableView.backgroundColor = .clear
+        panelQueueTableView.dataSource = self
+        panelQueueTableView.delegate = self
+        panelQueueTableView.menu = makeQueueRowMenu()
+        panelQueueTableView.onDelete = { [weak self] row in
+            self?.removeQueueItem(at: row)
+        }
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("preview"))
+        column.title = "Item"
+        column.resizingMask = [.autoresizingMask]
+        panelQueueTableView.addTableColumn(column)
+
+        panelQueueScrollView.documentView = panelQueueTableView
+        panelQueueScrollView.hasVerticalScroller = true
+        panelQueueScrollView.hasHorizontalScroller = false
+        panelQueueScrollView.borderType = .noBorder
+        panelQueueScrollView.drawsBackground = false
+        panelQueueScrollView.scrollerStyle = .overlay
+        panelQueueScrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        panelQueueEmptyLabel.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        panelQueueEmptyLabel.textColor = .secondaryLabelColor
+        panelQueueEmptyLabel.alignment = .center
+        panelQueueEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        panelQueueContainer.translatesAutoresizingMaskIntoConstraints = false
+        panelQueueContainer.addSubview(panelQueueScrollView)
+        panelQueueContainer.addSubview(panelQueueEmptyLabel)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
-            card.heightAnchor.constraint(greaterThanOrEqualToConstant: 96),
+            panelQueueScrollView.leadingAnchor.constraint(equalTo: panelQueueContainer.leadingAnchor),
+            panelQueueScrollView.trailingAnchor.constraint(equalTo: panelQueueContainer.trailingAnchor),
+            panelQueueScrollView.topAnchor.constraint(equalTo: panelQueueContainer.topAnchor),
+            panelQueueScrollView.bottomAnchor.constraint(equalTo: panelQueueContainer.bottomAnchor),
+
+            panelQueueEmptyLabel.centerXAnchor.constraint(equalTo: panelQueueContainer.centerXAnchor),
+            panelQueueEmptyLabel.centerYAnchor.constraint(equalTo: panelQueueContainer.centerYAnchor),
+            panelQueueEmptyLabel.leadingAnchor.constraint(greaterThanOrEqualTo: panelQueueContainer.leadingAnchor, constant: 8),
+            panelQueueEmptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: panelQueueContainer.trailingAnchor, constant: -8),
         ])
 
-        return card
+        panelQueueSection.contentView = panelQueueContainer
+    }
+
+    private func configureSpeedSection() {
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        let slowImage = NSImage(systemSymbolName: "tortoise.fill", accessibilityDescription: "Slower")?
+            .withSymbolConfiguration(symbolConfig)
+        let fastImage = NSImage(systemSymbolName: "hare.fill", accessibilityDescription: "Faster")?
+            .withSymbolConfiguration(symbolConfig)
+        let slowIcon = NSImageView(image: slowImage ?? NSImage())
+        slowIcon.contentTintColor = .secondaryLabelColor
+        let fastIcon = NSImageView(image: fastImage ?? NSImage())
+        fastIcon.contentTintColor = .secondaryLabelColor
+
+        panelSpeedSlider.target = self
+        panelSpeedSlider.action = #selector(typingSpeedSliderChanged(_:))
+        panelSpeedSlider.isContinuous = true
+        panelSpeedSlider.numberOfTickMarks = 0
+        panelSpeedSlider.doubleValue = typer.wordsPerMinute
+        panelSpeedSlider.translatesAutoresizingMaskIntoConstraints = false
+        panelSpeedSlider.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        panelSpeedValueLabel.font = NSFont.monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize,
+            weight: .regular
+        )
+        panelSpeedValueLabel.textColor = .secondaryLabelColor
+        panelSpeedValueLabel.alignment = .right
+        panelSpeedValueLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+
+        let sliderRow = NSStackView(views: [slowIcon, panelSpeedSlider, fastIcon])
+        sliderRow.orientation = .horizontal
+        sliderRow.alignment = .centerY
+        sliderRow.spacing = 8
+
+        let speedStack = NSStackView(views: [sliderRow, panelSpeedValueLabel])
+        speedStack.orientation = .vertical
+        speedStack.alignment = .trailing
+        speedStack.spacing = 6
+        sliderRow.translatesAutoresizingMaskIntoConstraints = false
+        sliderRow.widthAnchor.constraint(equalTo: speedStack.widthAnchor).isActive = true
+
+        panelSpeedSection.contentView = speedStack
+    }
+
+    private func configureAccessibilityBanner() {
+        let icon = NSImageView(
+            image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)
+                ?? NSImage()
+        )
+        icon.contentTintColor = .systemYellow
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+
+        let title = NSTextField(labelWithString: "Accessibility permission required")
+        title.font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+
+        let detail = NSTextField(wrappingLabelWithString:
+            "Clipboard Typer needs Accessibility access to type into other apps."
+        )
+        detail.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        detail.textColor = .secondaryLabelColor
+
+        panelAccessibilityButton.target = self
+        panelAccessibilityButton.action = #selector(requestAccessibilityFromMenu)
+        panelAccessibilityButton.bezelStyle = .rounded
+        panelAccessibilityButton.controlSize = .small
+
+        let textStack = NSStackView(views: [title, detail])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+
+        let row = NSStackView(views: [icon, textStack, NSView(), panelAccessibilityButton])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.distribution = .fill
+
+        panelAccessibilityBanner.tintColor = .systemYellow
+        panelAccessibilityBanner.contentView = row
+    }
+
+    private func configureFooter() {
+        panelStatusLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        panelStatusLabel.textColor = .secondaryLabelColor
+        panelStatusLabel.lineBreakMode = .byTruncatingTail
+        panelStatusLabel.maximumNumberOfLines = 2
+        panelStatusLabel.cell?.wraps = true
+        panelStatusLabel.alignment = .center
+
+        panelShortcutsLabel.stringValue = "⌃⌥⌘O Show controls   ⌃⌥⌘C Enqueue   ⌃⌥⌘V Type next"
+        panelShortcutsLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        panelShortcutsLabel.textColor = .tertiaryLabelColor
+        panelShortcutsLabel.alignment = .center
+    }
+
+    private func makeQueueRowMenu() -> NSMenu {
+        let menu = NSMenu()
+        let removeItem = NSMenuItem(title: "Remove", action: #selector(removeSelectedQueueRow), keyEquivalent: "")
+        removeItem.target = self
+        menu.addItem(removeItem)
+        return menu
     }
 
     private func addActionItem(_ item: NSMenuItem) {
@@ -364,10 +587,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setStatus("Queue cleared.")
     }
 
+    private func removeQueueItem(at index: Int) {
+        guard index >= 0, index < queue.count else {
+            return
+        }
+
+        queue.remove(at: index)
+        setStatus("Removed item from queue.")
+    }
+
     private func showControlsPanel(anchorToStatusItem: Bool = false) {
         if anchorToStatusItem {
             positionControlsPanelNearStatusItem()
-        } else {
+        } else if !controlsPanel.isVisible {
             controlsPanel.center()
         }
         controlsPanel.makeKeyAndOrderFront(nil)
@@ -410,41 +642,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenu() {
+        let isTyping = typer.isTyping
+        let queueCount = queue.count
+        let queueIsEmpty = queue.isEmpty
+        let accessibilityGranted = AXIsProcessTrusted()
+
         if let button = barItem.button {
-            button.title = typer.isTyping ? "⌨…" : "⌨\(queue.count)"
-            button.toolTip = "Clipboard Typer - Queue: \(queue.count), Speed: \(Int(round(typer.wordsPerMinute))) WPM"
+            button.title = isTyping ? " …" : " \(queueCount)"
+            button.toolTip = "Clipboard Typer - Queue: \(queueCount), Speed: \(Int(round(typer.wordsPerMinute))) WPM"
         }
 
+        NSApp.dockTile.badgeLabel = queueCount > 0 ? "\(queueCount)" : nil
+
+        let launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+        launchAtLoginItem.state = launchAtLoginEnabled ? .on : .off
+
         statusMessageItem.title = "Status: \(statusMessage)"
-        queueCountItem.title = "Queue: \(queue.count)"
+        queueCountItem.title = "Queue: \(queueCount)"
         nextPreviewItem.title = "Next: \(queue.nextPreview() ?? "Empty")"
         typingStatusItem.title = "Typing: \(currentlyTypingPreview ?? "Idle")"
 
-        enqueueItem.isEnabled = !typer.isTyping
-        typeNextItem.isEnabled = !queue.isEmpty && !typer.isTyping
-        stopTypingItem.isEnabled = typer.isTyping
-        clearQueueItem.isEnabled = !queue.isEmpty
+        enqueueItem.isEnabled = !isTyping
+        typeNextItem.isEnabled = !queueIsEmpty && !isTyping
+        stopTypingItem.isEnabled = isTyping
+        clearQueueItem.isEnabled = !queueIsEmpty
 
-        panelStatusLabel.stringValue = "Status: \(statusMessage)"
-        panelQueueCountLabel.stringValue = "Queue: \(queue.count)"
-        panelNextLabel.stringValue = "Next: \(queue.nextPreview() ?? "Empty")"
-        let queuePreviews = queue.previews()
-        panelQueueListLabel.stringValue = queuePreviews.isEmpty ? "Queue is empty." : queuePreviews.joined(separator: "\n")
-        panelEnqueueButton.isEnabled = !typer.isTyping
-        panelTypeNextButton.isEnabled = !queue.isEmpty && !typer.isTyping
-        panelStopButton.isEnabled = typer.isTyping
-        panelClearButton.isEnabled = !queue.isEmpty
+        panelStatusLabel.stringValue = statusMessage
+        panelQueueCountBadge.stringValue = "\(queueCount)"
+        panelQueueEmptyLabel.isHidden = !queueIsEmpty
+        panelQueueScrollView.isHidden = queueIsEmpty
+        panelQueueTableView.reloadData()
+
         panelSpeedSlider.doubleValue = typer.wordsPerMinute
-        panelSpeedValueLabel.stringValue = "Typing speed: \(Int(round(typer.wordsPerMinute))) WPM"
-        panelAccessibilityButton.title = AXIsProcessTrusted()
-            ? "Accessibility Granted"
-            : "Grant Accessibility"
-        panelAccessibilityButton.isEnabled = !AXIsProcessTrusted()
+        panelSpeedValueLabel.stringValue = "\(Int(round(typer.wordsPerMinute))) WPM"
 
-        accessibilityItem.title = AXIsProcessTrusted()
+        panelAccessibilityBanner.isHidden = accessibilityGranted
+
+        toolbarStopItem?.isEnabled = isTyping
+        toolbarClearItem?.isEnabled = !queueIsEmpty
+
+        accessibilityItem.title = accessibilityGranted
             ? "Accessibility Permission: Granted"
             : "Grant Accessibility Permission..."
-        accessibilityItem.isEnabled = !AXIsProcessTrusted()
+        accessibilityItem.isEnabled = !accessibilityGranted
     }
 
     private func setStatus(_ message: String) {
@@ -476,6 +716,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clearQueue()
     }
 
+    @objc private func removeSelectedQueueRow() {
+        let row = panelQueueTableView.clickedRow >= 0
+            ? panelQueueTableView.clickedRow
+            : panelQueueTableView.selectedRow
+        guard row >= 0 else { return }
+        removeQueueItem(at: row)
+    }
+
     @objc private func requestAccessibilityFromMenu() {
         if isAccessibilityTrusted(prompt: true) {
             setStatus("Accessibility permission is granted.")
@@ -492,10 +740,326 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let wordsPerMinute = round(sender.doubleValue)
         typer.wordsPerMinute = wordsPerMinute
         UserDefaults.standard.set(wordsPerMinute, forKey: Self.wordsPerMinuteDefaultsKey)
-        setStatus("Typing speed set to \(Int(wordsPerMinute)) WPM.")
+        updateMenu()
     }
 
     @objc private func quitFromMenu() {
         NSApplication.shared.terminate(nil)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+                setStatus("Disabled launch at login.")
+            } else {
+                try service.register()
+                setStatus("Enabled launch at login.")
+            }
+        } catch {
+            setStatus("Could not change launch-at-login: \(error.localizedDescription)")
+        }
+    }
+
+    @objc private func showShortcutsHelp() {
+        let alert = NSAlert()
+        alert.messageText = "Clipboard Typer Shortcuts"
+        alert.informativeText = """
+            ⌃⌥⌘O — Show controls window
+            ⌃⌥⌘C — Enqueue clipboard text
+            ⌃⌥⌘V — Type the next queued message
+
+            Inside the controls window:
+            • Delete or Backspace removes the selected queue item
+            • Right-click a queue item for the Remove menu
+            • The slider sets typing speed (100–500 WPM)
+
+            Toolbar Stop cancels the in-flight typing task.
+            Toolbar Clear empties the queue without typing.
+            """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}
+
+// MARK: - NSToolbarDelegate
+
+extension AppDelegate: NSToolbarDelegate {
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [
+            Self.toolbarStop,
+            Self.toolbarClear,
+        ]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [
+            Self.toolbarStop,
+            Self.toolbarClear,
+            .flexibleSpace,
+            .space,
+        ]
+    }
+
+    func toolbar(
+        _ toolbar: NSToolbar,
+        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        switch itemIdentifier {
+        case Self.toolbarStop:
+            let item = makeToolbarItem(
+                identifier: itemIdentifier,
+                label: "Stop",
+                symbolName: "stop.fill",
+                action: #selector(stopTypingFromMenu)
+            )
+            toolbarStopItem = item
+            return item
+        case Self.toolbarClear:
+            let item = makeToolbarItem(
+                identifier: itemIdentifier,
+                label: "Clear",
+                symbolName: "trash",
+                action: #selector(clearQueueFromMenu)
+            )
+            toolbarClearItem = item
+            return item
+        default:
+            return nil
+        }
+    }
+
+    private func makeToolbarItem(
+        identifier: NSToolbarItem.Identifier,
+        label: String,
+        symbolName: String,
+        action: Selector
+    ) -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = label
+        item.paletteLabel = label
+        item.toolTip = label
+        item.target = self
+        item.action = action
+        item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: label)
+        item.isBordered = true
+        return item
+    }
+}
+
+// MARK: - NSTableViewDataSource & NSTableViewDelegate
+
+extension AppDelegate: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        queue.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("QueueRowCell")
+
+        let cell: NSTableCellView
+        if let recycled = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+            cell = recycled
+        } else {
+            cell = NSTableCellView()
+            cell.identifier = identifier
+
+            let label = NSTextField(wrappingLabelWithString: "")
+            label.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            label.textColor = .labelColor
+            label.maximumNumberOfLines = 2
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+
+            cell.addSubview(label)
+            cell.textField = label
+
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                label.topAnchor.constraint(equalTo: cell.topAnchor, constant: 4),
+                label.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
+            ])
+        }
+
+        let messages = queue.allMessages()
+        if row < messages.count {
+            cell.textField?.stringValue = ClipboardQueue.preview(messages[row], limit: 96)
+        }
+
+        return cell
+    }
+}
+
+// MARK: - QueueTableView (delete-key support)
+
+final class QueueTableView: NSTableView {
+    var onDelete: ((Int) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        // 51 = delete (backspace), 117 = forward delete
+        if (event.keyCode == 51 || event.keyCode == 117), selectedRow >= 0 {
+            onDelete?(selectedRow)
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+// MARK: - SectionView (Liquid Glass card with optional title + accessory)
+
+/// A Tahoe-style rounded card. On macOS 26+ it renders inside an NSGlassEffectView
+/// (real Liquid Glass material). Older systems fall back to a subtle rounded card
+/// using `controlBackgroundColor`.
+final class SectionView: NSView {
+    private let titleLabel: NSTextField?
+    private let card = NSView()
+    private let separator = NSBox()
+    private let glassWrapper: NSView
+    private let headerStack = NSStackView()
+    private var headerAccessoryView: NSView?
+
+    var contentView: NSView? {
+        didSet {
+            oldValue?.removeFromSuperview()
+
+            guard let contentView else {
+                return
+            }
+
+            contentView.translatesAutoresizingMaskIntoConstraints = false
+            card.addSubview(contentView)
+
+            let topAnchor: NSLayoutYAxisAnchor
+            let topInset: CGFloat
+            if titleLabel != nil {
+                topAnchor = separator.bottomAnchor
+                topInset = 12
+            } else {
+                topAnchor = card.topAnchor
+                topInset = 14
+            }
+
+            NSLayoutConstraint.activate([
+                contentView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+                contentView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+                contentView.topAnchor.constraint(equalTo: topAnchor, constant: topInset),
+                contentView.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+            ])
+        }
+    }
+
+    var accessoryView: NSView? {
+        didSet {
+            if let oldValue {
+                headerStack.removeArrangedSubview(oldValue)
+                oldValue.removeFromSuperview()
+            }
+            if let accessoryView {
+                headerStack.addArrangedSubview(accessoryView)
+            }
+            headerAccessoryView = accessoryView
+        }
+    }
+
+    /// On macOS 26+ tints the underlying Liquid Glass material. On older systems
+    /// it tints the fallback card background.
+    var tintColor: NSColor? {
+        didSet {
+            if #available(macOS 26.0, *), let glass = glassWrapper as? NSGlassEffectView {
+                glass.tintColor = tintColor
+            } else {
+                card.layer?.backgroundColor = (tintColor?.withAlphaComponent(0.18)
+                    ?? NSColor.controlBackgroundColor).cgColor
+            }
+        }
+    }
+
+    init(title: String?) {
+        if let title {
+            let label = NSTextField(labelWithString: title)
+            label.font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+            label.textColor = .labelColor
+            titleLabel = label
+        } else {
+            titleLabel = nil
+        }
+
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 16
+            glassWrapper = glass
+        } else {
+            let fallback = NSView()
+            fallback.wantsLayer = true
+            fallback.layer?.cornerRadius = 12
+            fallback.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            fallback.layer?.borderColor = NSColor.separatorColor.cgColor
+            fallback.layer?.borderWidth = 0.5
+            glassWrapper = fallback
+        }
+
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        glassWrapper.translatesAutoresizingMaskIntoConstraints = false
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(glassWrapper)
+
+        if #available(macOS 26.0, *), let glass = glassWrapper as? NSGlassEffectView {
+            glass.contentView = card
+        } else {
+            glassWrapper.addSubview(card)
+            NSLayoutConstraint.activate([
+                card.leadingAnchor.constraint(equalTo: glassWrapper.leadingAnchor),
+                card.trailingAnchor.constraint(equalTo: glassWrapper.trailingAnchor),
+                card.topAnchor.constraint(equalTo: glassWrapper.topAnchor),
+                card.bottomAnchor.constraint(equalTo: glassWrapper.bottomAnchor),
+            ])
+        }
+
+        if let titleLabel {
+            separator.boxType = .separator
+            separator.translatesAutoresizingMaskIntoConstraints = false
+
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+            headerStack.orientation = .horizontal
+            headerStack.alignment = .firstBaseline
+            headerStack.spacing = 8
+            headerStack.translatesAutoresizingMaskIntoConstraints = false
+            headerStack.addArrangedSubview(titleLabel)
+            headerStack.addArrangedSubview(spacer)
+
+            card.addSubview(headerStack)
+            card.addSubview(separator)
+
+            NSLayoutConstraint.activate([
+                headerStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+                headerStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+                headerStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+
+                separator.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+                separator.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+                separator.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 10),
+                separator.heightAnchor.constraint(equalToConstant: 1),
+            ])
+        }
+
+        NSLayoutConstraint.activate([
+            glassWrapper.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glassWrapper.trailingAnchor.constraint(equalTo: trailingAnchor),
+            glassWrapper.topAnchor.constraint(equalTo: topAnchor),
+            glassWrapper.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }

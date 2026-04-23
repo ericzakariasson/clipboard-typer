@@ -9,7 +9,7 @@ enum TypingResult: Equatable {
 
 enum TypingSpeed {
     static let minimumWordsPerMinute = 100.0
-    static let maximumWordsPerMinute = 300.0
+    static let maximumWordsPerMinute = 500.0
     static let defaultWordsPerMinute = 160.0
 
     static func clamped(_ value: Double) -> Double {

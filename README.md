@@ -8,7 +8,7 @@ A small macOS utility for recording demos. It queues text from the clipboard and
 - `Ctrl-Opt-Cmd-V`: type the next queued message.
 - `Ctrl-Opt-Cmd-O`: open the controls window.
 
-The Dock app opens a native glassy controls window where you can type manually, stop the current typing task, clear the queue, grant Accessibility permission, or change the typing speed with a `100-300` WPM slider. The default speed is `160` WPM.
+The Dock app opens a native glassy controls window where you can type manually, stop the current typing task, clear the queue, grant Accessibility permission, or change the typing speed with a `100-500` WPM slider. The default speed is `160` WPM.
 
 The app also keeps a small menu bar item when macOS has room for it. If macOS hides that item, run this from the project folder to bring the controls window forward:
 
@@ -38,6 +38,14 @@ To create a local app bundle:
 Scripts/build-app.sh
 open ".build/Clipboard Typer.app"
 ```
+
+To install it into `/Applications` so it shows up in Spotlight, Launchpad, and `open -a "Clipboard Typer"`:
+
+```bash
+Scripts/install-app.sh
+```
+
+The script (re)builds the bundle, stops any running instance, copies it to `/Applications/Clipboard Typer.app`, and registers it with LaunchServices and Spotlight. Set `INSTALL_DIR=~/Applications` to install per-user instead.
 
 ## Notes
 

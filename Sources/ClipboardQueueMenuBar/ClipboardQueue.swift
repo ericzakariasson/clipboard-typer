@@ -46,6 +46,18 @@ final class ClipboardQueue {
         messages.removeAll()
     }
 
+    func remove(at index: Int) {
+        guard messages.indices.contains(index) else {
+            return
+        }
+
+        messages.remove(at: index)
+    }
+
+    func allMessages() -> [String] {
+        messages
+    }
+
     func nextPreview(limit: Int = 72) -> String? {
         guard let next = messages.first else {
             return nil
